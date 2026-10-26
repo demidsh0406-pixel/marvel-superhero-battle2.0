@@ -1,0 +1,113 @@
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+app.use(express.static("public"));
+
+const rooms = {};
+
+function makePlayer(id, hero) {
+  return {
+    id,
+    hero,
+    x: id === "p1" ? 20 : 80,
+    health: 100,
+    guarding: false
+  };
+}
+
+function sendState(code) {
+  const room = rooms[code];
+  if (room) io.to(code).emit("state", room);
+}
+
+io.on("connection", socket => {
+  socket.on("createRoom", hero => {
+    const code = Math.random().toString(36).slice(2, 7).toUpperCase();
+
+    rooms[code] = {
+      players: {
+        p1: makePlayer("p1", hero || "spider"),
+        p2: null
+      },
+      winner: null
+    };
+
+    socket.join(code);
+    socket.data.room = code;
+    socket.data.player = "p1";
+
+    socket.emit("roomCreated", code);
+    sendState(code);
+  });
+
+  socket.on("joinRoom", ({ code, hero }) => {
+    code = String(code || "").toUpperCase();
+    const room = rooms[code];
+
+    if (!room || room.players.p2) {
+      socket.emit("errorMessage", "Комната не найдена или уже заполнена");
+      return;
+    }
+
+    room.players.p2 = makePlayer("p2", hero || "iron");
+    socket.join(code);
+    socket.data.room = code;
+    socket.data.player = "p2";
+
+    sendState(code);
+  });
+
+  socket.on("action", action => {
+    const code = socket.data.room;
+    const room = rooms[code];
+    if (!room || room.winner || !action) return;
+
+    const player = room.players[socket.data.player];
+    const enemy = room.players[socket.data.player === "p1" ? "p2" : "p1"];
+    if (!player || !enemy) return;
+
+    if (action.type === "left") player.x = Math.max(5, player.x - 4);
+    if (action.type === "right") player.x = Math.min(95, player.x + 4);
+    if (action.type === "guardOn") player.guarding = true;
+    if (action.type === "guardOff") player.guarding = false;
+
+    if (action.type === "attack" || action.type === "special") {
+      const distance = Math.abs(player.x - enemy.x);
+      if (distance < 30) {
+        let damage = action.type === "special" ? 25 : 10;
+        if (enemy.guarding) damage = Math.ceil(damage / 3);
+        enemy.health = Math.max(0, enemy.health - damage);
+        if (enemy.health <= 0) room.winner = player.hero;
+      }
+    }
+
+    sendState(code);
+  });
+
+  socket.on("rematch", () => {
+    const code = socket.data.room;
+    const room = rooms[code];
+    if (!room) return;
+
+    room.players.p1.health = 100;
+    if (room.players.p2) room.players.p2.health = 100;
+    room.winner = null;
+    sendState(code);
+  });
+
+  socket.on("disconnect", () => {
+    const code = socket.data.room;
+    if (!code || !rooms[code]) return;
+    delete rooms[code];
+    io.to(code).emit("errorMessage", "Игрок отключился");
+  });
+});
+
+server.listen(process.env.PORT || 3000, "0.0.0.0", () => {
+  console.log("Marvel Superhero Battle server started");
+});
